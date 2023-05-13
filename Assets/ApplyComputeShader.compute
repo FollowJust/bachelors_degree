@@ -1,0 +1,49 @@
+#pragma kernel CSMain
+#pragma enable_d3d11_debug_symbols
+
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
+#include "Packages/com.unity.render-pipelines.high-definition/Runtime/ShaderLibrary/ShaderVariables.hlsl"
+
+Texture2D<uint> rasterDepthX;
+Texture2D<uint> rasterDepthY;
+
+//GBuffer0      baseColor.r,    baseColor.g,    baseColor.b,    specularOcclusion(7) / IsLightmap(1)
+//GBuffer1      normal.xy (1212),   perceptualRoughness
+//GBuffer2      f0.r,   f0.g,   f0.b,   featureID(3) / coatMask(5)
+//GBuffer3      bakedDiffuseLighting.rgb
+RW_TEXTURE2D_X(float4, _GBufferTexture0RW);
+RW_TEXTURE2D_X(float4, _GBufferTexture1RW);
+RW_TEXTURE2D_X(float4, _GBufferTexture2RW);
+RW_TEXTURE2D_X(float4, _GBufferTexture3RW);
+RW_TEXTURE2D_X(float4, specularLightingUAV); // == WTF WHY IS THIS NEEEDEDDDD??????
+
+#define LAYER_MAX_DEPTH 0xFFFF
+
+void layer_unpack_depth(uint value, out float depth, out uint payload)
+{
+    depth				= (value >> 16) / float(LAYER_MAX_DEPTH);
+    payload				= value & 0xFFFF;
+}
+
+[numthreads(16, 16, 1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    // TODO: insert actual code here!
+    UNITY_XR_ASSIGN_VIEW_INDEX(id.z);
+
+    float depth = 0;
+    uint2 packed_uv = 0;
+    layer_unpack_depth(rasterDepthX[id.xy], depth, packed_uv.x);
+    layer_unpack_depth(rasterDepthY[id.xy], depth, packed_uv.y);
+    float2 original_uv = f16tof32(packed_uv);
+
+    if (depth == 0) {
+        return;
+    }
+
+    _GBufferTexture0RW[COORD_TEXTURE2D_X(id.xy)] = float4(1, 0, 0, 1);
+    // _GBufferTexture1RW[COORD_TEXTURE2D_X(id.xy)] = float4(1, 0, 0, 1);
+    // _GBufferTexture2RW[COORD_TEXTURE2D_X(id.xy)] = float4(depth, 0, 0, 1);
+    // _GBufferTexture3RW[COORD_TEXTURE2D_X(id.xy)] = float4(1, 0, 0, 1);
+    // specularLightingUAV[COORD_TEXTURE2D_X(id.xy)] = float4(depth, 0, 0, 1);
+}

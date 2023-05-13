@@ -1,0 +1,154 @@
+#pragma kernel CSMain
+#pragma enable_d3d11_debug_symbols
+
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
+#include "Packages/com.unity.render-pipelines.high-definition/Runtime/ShaderLibrary/ShaderVariables.hlsl"
+
+RWTexture2D<float4> layerDisplacementData;
+
+RWTexture2D<uint> rasterDepthX;
+RWTexture2D<uint> rasterDepthY;
+
+#define LAYER_MAX_DEPTH 0xFFFF
+#define LAYER_SCANLINE_RASTERIZER 1
+
+float edgeFunction(float2 a, float2 b, float2 c) {
+	return (c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x);
+}
+
+uint packDepth(float depth, int payload) {
+	uint d = uint(saturate(depth) * LAYER_MAX_DEPTH);
+	payload	&= 0xFFFF;
+	return d << 16 | payload;
+}
+
+bool2 unpackMask(float val) {
+	uint uval = uint(val);
+	return bool2((uval & 1) != 0, (uval & 2) != 0);
+}
+
+
+void writeDepth(float depth, uint2 coord, float2 payload) {
+	uint packedDepthWithPayloadX = packDepth(depth, f32tof16(payload.x));
+	uint packedDepthWithPayloadY = packDepth(depth, f32tof16(payload.y));
+	uint oldDepth;
+
+	InterlockedMax(rasterDepthX[coord], packedDepthWithPayloadX, oldDepth);
+	InterlockedMax(rasterDepthY[coord], packedDepthWithPayloadY, oldDepth);
+}
+
+void swap(inout float3 a, inout float3 b) {
+	float3 t = a;
+	a = b;
+	b = t;
+}
+
+void swap(inout float2 a, inout float2 b) {
+	float2 t = a;
+	a = b;
+	b = t;
+}
+
+void rasterize(float3 A, float3 B, float3 C, float2 Ap, float2 Bp, float2 Cp) {
+	float3 points[3] = {A, B, C};
+	float2 payloads[3] = {Ap, Bp, Cp};
+
+	if (points[0].y > points[1].y) {
+		swap(points[0], points[1]);
+		swap(payloads[0], payloads[1]);
+	}
+
+	if (points[1].y > points[2].y) {
+		swap(points[1], points[2]);
+		swap(payloads[1], payloads[2]);
+	}
+
+	if (points[0].y > points[1].y) {
+		swap(points[0], points[1]);
+		swap(payloads[0], payloads[1]);
+	}
+
+	float3 depths = float3(A.z, B.z, C.z);
+	float area = edgeFunction(A, B, C);
+
+	for (int coord_y0 = max(0, points[0].y); coord_y0 <= min(_ScreenParams.y - 1, points[1].y); ++coord_y0) {
+		float cx1 = lerp(points[0].x, points[1].x, saturate((coord_y0 - points[0].y) / (points[1].y - points[0].y)));
+		float cx2 = lerp(points[0].x, points[2].x, saturate((coord_y0 - points[0].y) / (points[2].y - points[0].y)));
+		int left = max(0, min(cx1, cx2));
+		int right = min(_ScreenParams.x - 1, max(cx1, cx2));
+
+		for (int x = left; x <= right; ++x) {
+			uint2 coord	= uint2(x, coord_y0);
+
+			float3 b;
+			b.x	= edgeFunction(B.xy, C.xy, coord);
+			b.y	= edgeFunction(C.xy, A.xy, coord);
+			b.z	= edgeFunction(A.xy, B.xy, coord);
+
+			b /= area;
+
+			float d = dot(depths, b);
+			d = lerp(0, d, step(0, d) * step(d, 1));
+
+			writeDepth(d, coord, Ap * b.x + Bp * b.y + Cp * b.z);
+		}
+	}
+
+	for (int coord_y1 = max(0, points[1].y); coord_y1 <= min(_ScreenParams.y - 1, points[2].y); ++coord_y1) {
+		float cx1 = lerp(points[1].x, points[2].x, saturate((coord_y1 - points[1].y) / (points[2].y - points[1].y)));
+		float cx2 = lerp(points[0].x, points[2].x, saturate((coord_y1 - points[0].y) / (points[2].y - points[0].y)));
+		int left = max(0, min(cx1, cx2));
+		int right = min(_ScreenParams.x - 1, max(cx1, cx2));
+
+		for (int x = left; x <= right; ++x) {
+			uint2 coord	= uint2(x, coord_y1);
+
+			float3 b;
+			b.x = edgeFunction(B.xy, C.xy, coord);
+			b.y	= edgeFunction(C.xy, A.xy, coord);
+			b.z	= edgeFunction(A.xy, B.xy, coord);
+
+			b /= area;
+
+			float d = dot(depths, b);
+			d = lerp(0, d, step(0, d) * step(d, 1));
+
+			writeDepth(d, coord, Ap * b.x + Bp * b.y + Cp * b.z);
+		}
+	}
+}
+
+float2 getScreenUV(float2 vpos) {
+	return vpos / _ScreenParams.xy;
+}
+
+[numthreads(16, 16, 2)]
+void CSMain( uint3 groupID : SV_GroupID, uint threadID : SV_GroupIndex ) {
+    uint2 localID = uint2( threadID & 15, threadID >> 4 );
+    uint2 globalID = groupID.xy * 16 + localID;
+	uint2 nextID = min(globalID.xy + 1, _ScreenParams.xy - 1);
+	uint2 rightID = uint2(nextID.x, globalID.y);
+	uint2 bottomID = uint2(globalID.x, nextID.y);
+
+	rasterDepthX[globalID] = 0;
+	rasterDepthY[globalID] = 0;
+
+	float4 A = layerDisplacementData[globalID];
+	float4 B = layerDisplacementData[rightID];
+	float4 C = layerDisplacementData[bottomID];
+	float4 D = layerDisplacementData[nextID];
+
+	bool2 Ac = unpackMask(A.w);
+	bool2 Bc = unpackMask(B.w);
+	bool2 Cc = unpackMask(C.w);
+	bool2 Dc = unpackMask(D.w);
+
+
+	[branch]
+	if (Ac.x && Bc.x && Cc.x && Dc.x && (Ac.y || Bc.y || Cc.y || Dc.y)) {
+		if (groupID.z)
+			rasterize(A.xyz, C.xyz, D.xyz, getScreenUV(globalID), getScreenUV(bottomID), getScreenUV(nextID));
+		else
+			rasterize(A.xyz, D.xyz, B.xyz, getScreenUV(globalID), getScreenUV(nextID), getScreenUV(rightID));
+	}
+}
