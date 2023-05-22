@@ -49,6 +49,13 @@ class LayerRasterizePass : CustomPass
         // The context contains the command buffer to use to enqueue graphics commands.
         using (new ProfilingScope(ctx.cmd, new ProfilingSampler(ProfilerTag)))
         {
+            RenderTargetIdentifier[] RTs = {
+                rasterDepthXRT,
+                rasterDepthYRT
+            };
+            CoreUtils.SetRenderTarget(ctx.cmd, RTs, ctx.customDepthBuffer.Value);
+            CoreUtils.ClearRenderTarget(ctx.cmd, ClearFlag.All, Color.clear);
+
             rasterizeComputeShader.SetTexture(0, "layerDisplacementData", LayerPreparePass.layerDisplacementData);
             rasterizeComputeShader.SetTexture(0, "rasterDepthX", rasterDepthXRT);
             rasterizeComputeShader.SetTexture(0, "rasterDepthY", rasterDepthYRT);
